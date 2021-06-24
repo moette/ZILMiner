@@ -201,7 +201,7 @@ void EthGetworkClient::handle_connect(const boost::system::error_code& ec)
             // This endpoint does not respond
             // Pop it and retry
             cwarn << "Error connecting to " << m_conn->Host() << ":" << toString(m_conn->Port())
-                  << " : " << ec;
+                  << " : " << ec.message();
             m_endpoints.pop();
             begin_connect();
         }
@@ -223,7 +223,7 @@ void EthGetworkClient::handle_write(const boost::system::error_code& ec)
         if (ec != boost::asio::error::operation_aborted)
         {
             cwarn << "Error writing to " << m_conn->Host() << ":" << toString(m_conn->Port())
-                  << " : " << ec;
+                  << " : " << ec.message();
             m_endpoints.pop();
             begin_connect();
         }
@@ -354,8 +354,7 @@ void EthGetworkClient::handle_read(
         if (ec != boost::asio::error::operation_aborted)
         {
             cwarn << "Error reading from :" << m_conn->Host() << ":" << toString(m_conn->Port())
-                  << " : "
-                  << ec;
+                  << " : " << ec.message();
             disconnect();
         }
        
@@ -379,7 +378,7 @@ void EthGetworkClient::handle_resolve(
     }
     else
     {
-        cwarn << "Could not resolve host " << m_conn->Host() << ", " << ec;
+        cwarn << "Could not resolve host " << m_conn->Host() << ", " << ec.message();
         disconnect();
     }
 }
@@ -430,6 +429,29 @@ void EthGetworkClient::processResponse(Json::Value& JRes)
             {
                 cwarn << "Missing data for eth_getWork request from " << m_conn->Host() << ":"
                       << toString(m_conn->Port());
+
+                // 22.06.2021 MOE: Retry later to see if host has a better answer
+                m_getwork_timer.expires_from_now(boost::posix_time::seconds(m_farmRecheckPeriod));
+                m_getwork_timer.async_wait(
+                    m_io_strand.wrap(boost::bind(&EthGetworkClient::getwork_timer_elapsed, this,
+                        boost::asio::placeholders::error)));
+            }
+            else if (!JRes.get("result", Json::Value::null).isValidIndex(4) ||
+                     JRes.get("result", Json::Value::null)
+                             .get(Json::Value::ArrayIndex(3), false)
+                             .type() != Json::ValueType::booleanValue)
+            {
+                // 22.06.2021 MOE: Some pools reply with malformed answers (ZIL getwork extensions
+                // are missing in the reply) - ignore these and retry immediately
+                // https://github.com/DurianStallSingapore/ZILMiner/issues/24
+
+                cwarn << "Missing ZIL data for eth_getWork request from " << m_conn->Host() << ":"
+                      << toString(m_conn->Port());
+
+                m_getwork_timer.expires_from_now(boost::posix_time::seconds(1));
+                m_getwork_timer.async_wait(
+                    m_io_strand.wrap(boost::bind(&EthGetworkClient::getwork_timer_elapsed, this,
+                        boost::asio::placeholders::error)));
             }
             else
             {
